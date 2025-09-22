@@ -1303,7 +1303,23 @@ def vendas():
     # Lista das últimas 50 linhas de itens de venda, com mais detalhes
     with conn() as c:
         ultimos = c.execute(
-            """
+
+
+@app.route("/rmas", methods=["GET","POST"])
+def rmas():
+    if request.method == "POST":
+        f = request.form
+        sale_id = int(f.get("sale_id"))
+        tipo = f.get("tipo")
+        forma = f.get("forma")
+        motivo = f.get("motivo")
+        valor_reembolso = float(f.get("valor_reembolso") or 0)
+        sale_item_id = int(f.get("sale_item_id"))
+        qtde = int(f.get("qtde") or 1)
+        sku = f.get("product_sku")
+
+        now = datetime.datetime.nowwith conn() as c:
+    ultimos = c.execute("""
       SELECT
         s.id AS sale_id, s.data,
         COALESCE(c.nome,'-')      AS cliente,
@@ -1320,24 +1336,19 @@ def vendas():
       LEFT JOIN customers c ON c.id = s.customer_id
       ORDER BY s.id DESC
       LIMIT 20
-            """
-        ).fetchall()
-    return render_template("vendas.html", vendas=ultimos, ultimos=ultimos)
+    """).fetchall()
 
-@app.route("/rmas", methods=["GET","POST"])
-def rmas():
-    if request.method == "POST":
-        f = request.form
-        sale_id = int(f.get("sale_id"))
-        tipo = f.get("tipo")
-        forma = f.get("forma")
-        motivo = f.get("motivo")
-        valor_reembolso = float(f.get("valor_reembolso") or 0)
-        sale_item_id = int(f.get("sale_item_id"))
-        qtde = int(f.get("qtde") or 1)
-        sku = f.get("product_sku")
+    vendedores = c.execute(
+        "SELECT id, nome FROM users ORDER BY nome"
+    ).fetchall()
 
-        now = datetime.datetime.now()
+return render_template(
+    "vendas.html",
+    vendas=ultimos,
+    ultimos=ultimos,
+    vendedores=vendedores,
+)
+
         codigo = "RMA-" + now.strftime("%Y%m%d%H%M%S")
         with conn() as c:
             # janela RMA
