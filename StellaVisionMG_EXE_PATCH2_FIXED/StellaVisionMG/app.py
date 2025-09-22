@@ -1,4 +1,4 @@
-import os, sqlite3, json, datetime, re, hashlib, sys, unicodedata
+import os, sqlite3, json, datetime, re, hashlib, sys, unicodedata, io, csv
 from flask import Flask, render_template, request, redirect, url_for, jsonify, send_file, flash, session, g
 try:
     from flask_wtf import CSRFProtect  # type: ignore
@@ -607,6 +607,20 @@ def apply_filters_where(ini,fim,categoria,cidade,vendedor):
         params.append(vendedor)
     return " AND ".join(where), params
 
+def as_csv(rows, headers, filename):
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(headers)
+    for r in rows:
+        writer.writerow([r[i] for i in range(len(headers))])
+    data = io.BytesIO(buf.getvalue().encode("utf-8-sig"))
+    return send_file(
+        data,
+        mimetype="text/csv",
+        download_name=filename,
+        as_attachment=True,
+    )
+
 @app.context_processor
 def inject_helpers():
     def q_toggle_top(metric):
@@ -741,77 +755,105 @@ def compute_kpis(ini, fim, categoria, cidade, vendedor, incluir_rma):
         }
         return kpis
 
-def compute_graphs(ini,fim,categoria,cidade,vendedor,incluir_rma, top_metric):
+def compute_graphs(ini, fim, categoria=None, cidade=None, vendedor=None, incluir_rma=True, top_metric="faturamento"):
     with conn() as c:
-        where, params = apply_filters_where(ini,fim,categoria,cidade,vendedor)
+        where, params = apply_filters_where(ini, fim, categoria, cidade, vendedor)
 
-        # Top 10 por faturamento/quantidade
-        if top_metric == "quantidade":
-            sql_top = f"""
-              SELECT p.nome AS label, SUM(si.qtde) v
-              FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id
-              WHERE {where} GROUP BY p.id ORDER BY v DESC LIMIT 10
-            """
-            label = "Quantidade"
-        else:
-            sql_top = f"""
+        top_fat = c.execute(
+            f"""
               SELECT p.nome AS label, SUM(si.qtde*si.preco_unit) v
               FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id
               WHERE {where} GROUP BY p.id ORDER BY v DESC LIMIT 10
-            """
-            label = "Faturamento (R$)"
-        top = c.execute(sql_top, params).fetchall()
-        top_labels = [r["label"] for r in top]
-        top_values = [round(r["v"] or 0,2) for r in top]
+            """,
+            params,
+        ).fetchall()
+        top_fat_labels = [r["label"] for r in top_fat]
+        top_fat_values = [round(r["v"] or 0, 2) for r in top_fat]
 
-        # Pizza por categoria (inclui "Sem categoria")
-        pie = c.execute(f"""
+        top_qtd = c.execute(
+            f"""
+              SELECT p.nome AS label, SUM(si.qtde) v
+              FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id
+              WHERE {where} GROUP BY p.id ORDER BY v DESC LIMIT 10
+            """,
+            params,
+        ).fetchall()
+        topq_labels = [r["label"] for r in top_qtd]
+        topq_values = [int(r["v"] or 0) for r in top_qtd]
+
+        if top_metric == "quantidade":
+            top_labels = topq_labels
+            top_values = topq_values
+            metric_label = "Quantidade"
+        else:
+            top_labels = top_fat_labels
+            top_values = top_fat_values
+            metric_label = "Faturamento (R$)"
+
+        pie = c.execute(
+            f"""
           SELECT COALESCE(p.categoria, 'Sem categoria') AS cat, SUM(si.qtde*si.preco_unit) v
           FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id
           WHERE {where} GROUP BY COALESCE(p.categoria, 'Sem categoria')
-        """, params).fetchall()
-        cat_labels = [r["cat"] for r in pie]
-        cat_values = [round(r["v"] or 0,2) for r in pie]
+        """,
+            params,
+        ).fetchall()
+        pie_labels = [r["cat"] for r in pie]
+        pie_values = [round(r["v"] or 0, 2) for r in pie]
 
-        # Margem por categoria (últimos 30d, ignora custo nulo)
         ult30_ini = fim - datetime.timedelta(days=29)
-        mc = c.execute(f"""
+        mc = c.execute(
+            f"""
           SELECT COALESCE(p.categoria,'Sem categoria') AS cat,
                  SUM(CASE WHEN si.custo_snap>0 THEN (si.qtde*si.preco_unit - si.qtde*si.custo_snap) ELSE 0 END) lucro,
                  SUM(CASE WHEN si.custo_snap>0 THEN (si.qtde*si.preco_unit) ELSE 0 END) receita
           FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id
           WHERE date(s.data) BETWEEN ? AND ? AND ({where})
           GROUP BY COALESCE(p.categoria,'Sem categoria')
-        """, [ult30_ini.isoformat(), fim.isoformat(), *params]).fetchall()
-        m_labels = [r["cat"] for r in mc]
-        m_values = [round((r["lucro"]/r["receita"]*100) if r["receita"] else 0,2) for r in mc]
+        """,
+            [ult30_ini.isoformat(), fim.isoformat(), *params],
+        ).fetchall()
+        marg_labels = [r["cat"] for r in mc]
+        marg_values = [round((r["lucro"] / r["receita"] * 100) if r["receita"] else 0, 2) for r in mc]
 
-        # Vendas por dia (com zeros)
-        r30 = c.execute(f"""
+        r30 = c.execute(
+            f"""
           SELECT date(s.data) AS d, SUM(si.qtde*si.preco_unit) v
           FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id
           WHERE date(s.data) BETWEEN ? AND ? AND ({where})
           GROUP BY date(s.data)
-        """, [ult30_ini.isoformat(), fim.isoformat(), *params]).fetchall()
+        """,
+            [ult30_ini.isoformat(), fim.isoformat(), *params],
+        ).fetchall()
         mapa30 = {row["d"]: row["v"] for row in r30}
-        labels30 = [ (ult30_ini + datetime.timedelta(days=i)).isoformat() for i in range(30) ]
-        valores30 = [round(mapa30.get(d,0),2) for d in labels30]
+        day_labels = [(ult30_ini + datetime.timedelta(days=i)).isoformat() for i in range(30)]
+        day_values = [round(mapa30.get(d, 0), 2) for d in day_labels]
 
-        # Cidades vendidas
-        rows_cid = c.execute(f"""
+        rows_cid = c.execute(
+            f"""
           SELECT s.cidade_snapshot AS cid, SUM(si.qtde*si.preco_unit) v
           FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id
           WHERE {where} GROUP BY s.cidade_snapshot
-        """, params).fetchall()
-        cid_labels = [ (r["cid"] or "(sem cidade)") for r in rows_cid ]
-        cid_values = [ round(r["v"] or 0,2) for r in rows_cid ]
+        """,
+            params,
+        ).fetchall()
+        city_labels = [(r["cid"] or "(sem cidade)") for r in rows_cid]
+        city_values = [round(r["v"] or 0, 2) for r in rows_cid]
+
+        def nz(x):
+            return x if x else []
+
+        pie_payload = {"labels": nz(pie_labels), "values": nz(pie_values)}
+        margem_payload = {"labels": nz(marg_labels), "values": nz(marg_values)}
 
         return {
-            "top10": {"labels": top_labels, "values": top_values, "label": label},
-            "categoria": {"labels": cat_labels, "values": cat_values},
-            "margem_categoria": {"labels": m_labels, "values": m_values},
-            "vendas_dia": {"labels": labels30, "values": valores30},
-            "cidades": {"labels": cid_labels, "values": cid_values}
+            "top10": {"labels": nz(top_labels), "values": nz(top_values), "label": metric_label},
+            "top10_qtd": {"labels": nz(topq_labels), "values": nz(topq_values)},
+            "pie_categoria": pie_payload,
+            "categoria": pie_payload,
+            "margem_categoria": margem_payload,
+            "vendas_dia": {"labels": nz(day_labels), "values": nz(day_values)},
+            "cidades": {"labels": nz(city_labels), "values": nz(city_values)},
         }
 
 # === ROUTES ===
@@ -875,11 +917,12 @@ def dashboard():
         chart_values=chart_values,
     )
 
+@app.route("/api_graficos")
 @app.route("/api/graficos")
 def api_graficos():
     ini,fim,categoria,cidade,vendedor,incluir_rma = get_filters()
     top_metric = request.args.get("top","faturamento")
-    charts = compute_graphs(ini,fim,categoria,cidade,vendedor,incluir_rma, top_metric)
+    charts = compute_graphs(ini, fim, categoria, cidade, vendedor, incluir_rma, top_metric)
     return jsonify(charts)
 
 @app.route("/relatorios")
@@ -888,7 +931,44 @@ def relatorios():
     kpis = compute_kpis(ini,fim,categoria,cidade,vendedor,incluir_rma)
     # reposição
     with conn() as c:
-        repos = c.execute("SELECT sku,nome,estoque_atual,estoque_minimo FROM products WHERE estoque_atual < estoque_minimo").fetchall()
+        reposicao_rows = c.execute(
+            """
+    WITH fam AS (
+      SELECT
+        UPPER(TRIM(nome))                        AS k_nome,
+        UPPER(TRIM(modelo))                      AS k_modelo,
+        UPPER(TRIM(COALESCE(capacidade,'')))     AS k_cap,
+        SUM(COALESCE(estoque_atual,0))           AS estoque_total,
+        MAX(COALESCE(estoque_minimo,0))          AS minimo_familia,
+        MIN(sku)                                  AS sku_exemplo,
+        MIN(COALESCE(categoria,''))               AS categoria_exemplo
+      FROM products
+      GROUP BY k_nome, k_modelo, k_cap
+    )
+    SELECT
+      sku_exemplo AS sku,
+      k_nome || ' ' || k_modelo || ' ' || k_cap AS produto,
+      estoque_total AS estoque,
+      minimo_familia AS minimo,
+      categoria_exemplo AS categoria
+    FROM fam
+    WHERE estoque_total < minimo_familia
+    ORDER BY (minimo_familia - estoque_total) DESC
+            """
+        ).fetchall()
+        repos = [
+            {
+                "sku": r["sku"],
+                "produto": r["produto"],
+                "nome": r["produto"],
+                "estoque": r["estoque"],
+                "estoque_atual": r["estoque"],
+                "minimo": r["minimo"],
+                "estoque_minimo": r["minimo"],
+                "categoria": r["categoria"],
+            }
+            for r in reposicao_rows
+        ]
         # por vendedor
         rows = c.execute("""
           SELECT u.nome, COALESCE(SUM(si.qtde*si.preco_unit),0) faturamento,
@@ -1141,7 +1221,8 @@ def vendas():
                 c.execute("SELECT cidade FROM customers WHERE id=?", (cust_id,))
                 .fetchone()["cidade"]
             )
-            vend_id = int(f.get("vendedor_id") or 2)
+            vend_raw = f.get("vendedor_id")
+            vend_id = int(vend_raw) if vend_raw else int(current_user_id() or 2)
             # Política de desconto
             desconto_pct = float(f.get("desconto_pct") or 0)
             settings = get_settings()
@@ -1221,32 +1302,27 @@ def vendas():
             flash("Venda registrada", "success")
     # Lista das últimas 50 linhas de itens de venda, com mais detalhes
     with conn() as c:
-        vendas = c.execute(
+        ultimos = c.execute(
             """
-            SELECT
-              si.id AS sale_item_id,
-              s.id AS sale_id,
-              s.data AS data,
-              c.nome AS cliente,
-              c.telefone AS telefone,
-              s.cidade_snapshot AS cidade,
-              u.nome AS vendedor,
-              p.nome AS produto,
-              p.sku AS sku,
-              si.qtde AS qtde,
-              si.preco_unit AS preco_unit,
-              si.desconto_pct AS desconto_pct,
-              si.desconto_valor AS desconto_valor
-            FROM sales s
-            JOIN sale_items si ON si.sale_id = s.id
-            JOIN products p ON p.id = si.product_id
-            LEFT JOIN customers c ON c.id = s.customer_id
-            LEFT JOIN users u ON u.id = s.vendedor_id
-            ORDER BY s.id DESC, si.id DESC
-            LIMIT 50
-            """,
+      SELECT
+        s.id AS sale_id, s.data,
+        COALESCE(c.nome,'-')      AS cliente,
+        COALESCE(c.telefone,'-')  AS telefone,
+        COALESCE(s.cidade_snapshot,'-') AS cidade,
+        p.nome AS produto, p.sku,
+        si.qtde, si.preco_unit,
+        si.desconto_pct, si.desconto_valor,
+        COALESCE(u.nome,'-')      AS vendedor
+      FROM sale_items si
+      JOIN sales s        ON s.id = si.sale_id
+      LEFT JOIN users u   ON u.id = s.vendedor_id
+      LEFT JOIN products p ON p.id = si.product_id
+      LEFT JOIN customers c ON c.id = s.customer_id
+      ORDER BY s.id DESC
+      LIMIT 20
+            """
         ).fetchall()
-    return render_template("vendas.html", vendas=vendas)
+    return render_template("vendas.html", vendas=ultimos, ultimos=ultimos)
 
 @app.route("/rmas", methods=["GET","POST"])
 def rmas():
@@ -1332,27 +1408,148 @@ def config():
 # === EXPORTS ===
 @app.route("/export/ajustes.csv")
 def export_ajustes_csv():
-    import csv, io
     with conn() as c:
-        rows = c.execute("SELECT a.id, p.sku, p.nome, a.ajuste_tipo, a.qtde_delta, a.qtde_antes, a.qtde_depois, a.motivo, a.created_at FROM stock_adjustments a JOIN products p ON p.id=a.product_id ORDER BY a.id DESC").fetchall()
-    out = io.StringIO()
-    w = csv.writer(out, delimiter=';')
-    w.writerow(["id","sku","nome","tipo","delta","antes","depois","motivo","created_at"])
-    for r in rows: w.writerow([r["id"], r["sku"], r["nome"], r["ajuste_tipo"], r["qtde_delta"], r["qtde_antes"], r["qtde_depois"], r["motivo"], r["created_at"]])
-    out.seek(0)
-    return app.response_class(out.read(), mimetype="text/csv")
+        rows = c.execute(
+            "SELECT a.id, p.sku, p.nome, a.ajuste_tipo, a.qtde_delta, a.qtde_antes, a.qtde_depois, a.motivo, a.created_at "
+            "FROM stock_adjustments a JOIN products p ON p.id=a.product_id ORDER BY a.id DESC"
+        ).fetchall()
+    headers = ["ID", "SKU", "Produto", "Tipo", "Delta", "Antes", "Depois", "Motivo", "Criado em"]
+    return as_csv(rows, headers, "ajustes.csv")
+
 
 @app.route("/export/reposicao.csv")
 def export_reposicao_csv():
-    import csv, io
     with conn() as c:
-        rows = c.execute("SELECT sku,nome,estoque_atual,estoque_minimo FROM products WHERE estoque_atual < estoque_minimo").fetchall()
-    out = io.StringIO()
-    w = csv.writer(out, delimiter=';')
-    w.writerow(["sku","nome","estoque_atual","estoque_minimo"])
-    for r in rows: w.writerow([r["sku"], r["nome"], r["estoque_atual"], r["estoque_minimo"]])
-    out.seek(0)
-    return app.response_class(out.read(), mimetype="text/csv")
+        rows = c.execute(
+            """
+    WITH fam AS (
+      SELECT
+        UPPER(TRIM(nome))                        AS k_nome,
+        UPPER(TRIM(modelo))                      AS k_modelo,
+        UPPER(TRIM(COALESCE(capacidade,'')))     AS k_cap,
+        SUM(COALESCE(estoque_atual,0))           AS estoque_total,
+        MAX(COALESCE(estoque_minimo,0))          AS minimo_familia,
+        MIN(sku)                                  AS sku_exemplo,
+        MIN(COALESCE(categoria,''))               AS categoria_exemplo
+      FROM products
+      GROUP BY k_nome, k_modelo, k_cap
+    )
+    SELECT
+      sku_exemplo AS sku,
+      k_nome || ' ' || k_modelo || ' ' || k_cap AS produto,
+      estoque_total AS estoque,
+      minimo_familia AS minimo,
+      categoria_exemplo AS categoria
+    FROM fam
+    WHERE estoque_total < minimo_familia
+    ORDER BY (minimo_familia - estoque_total) DESC
+            """
+        ).fetchall()
+    headers = ["SKU", "Produto", "Estoque", "Mínimo", "Categoria"]
+    return as_csv(rows, headers, "reposicao.csv")
+
+
+@app.route("/export/vendas.csv")
+def export_vendas_csv():
+    ini, fim, categoria, cidade, vendedor, incluir_rma = get_filters()
+    where, params = apply_filters_where(ini, fim, categoria, cidade, vendedor)
+    with conn() as c:
+        rows = c.execute(
+            f"""
+          SELECT s.id, s.data, COALESCE(c.nome,'-') AS cliente,
+                 SUM(si.qtde * si.preco_unit) AS valor_total
+          FROM sales s
+          JOIN sale_items si ON si.sale_id = s.id
+          JOIN products p ON p.id = si.product_id
+          LEFT JOIN customers c ON c.id = s.customer_id
+          WHERE {where}
+          GROUP BY s.id, s.data, cliente
+          ORDER BY s.id DESC
+        """,
+            params,
+        ).fetchall()
+    headers = ["ID", "Data", "Cliente", "Valor total"]
+    return as_csv(rows, headers, "vendas.csv")
+
+
+@app.route("/export/top10_faturamento.csv")
+def export_top10_faturamento_csv():
+    ini, fim, categoria, cidade, vendedor, incluir_rma = get_filters()
+    where, params = apply_filters_where(ini, fim, categoria, cidade, vendedor)
+    with conn() as c:
+        rows = c.execute(
+            f"""
+          SELECT p.nome, SUM(si.qtde*si.preco_unit) AS faturamento
+          FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id
+          WHERE {where}
+          GROUP BY p.id
+          ORDER BY faturamento DESC
+          LIMIT 10
+        """,
+            params,
+        ).fetchall()
+    headers = ["Produto", "Faturamento"]
+    return as_csv(rows, headers, "top10_faturamento.csv")
+
+
+@app.route("/export/top10_quantidade.csv")
+def export_top10_quantidade_csv():
+    ini, fim, categoria, cidade, vendedor, incluir_rma = get_filters()
+    where, params = apply_filters_where(ini, fim, categoria, cidade, vendedor)
+    with conn() as c:
+        rows = c.execute(
+            f"""
+          SELECT p.nome, SUM(si.qtde) AS quantidade
+          FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id
+          WHERE {where}
+          GROUP BY p.id
+          ORDER BY quantidade DESC
+          LIMIT 10
+        """,
+            params,
+        ).fetchall()
+    headers = ["Produto", "Quantidade"]
+    return as_csv(rows, headers, "top10_quantidade.csv")
+
+
+@app.route("/export/categorias.csv")
+def export_categorias_csv():
+    ini, fim, categoria, cidade, vendedor, incluir_rma = get_filters()
+    where, params = apply_filters_where(ini, fim, categoria, cidade, vendedor)
+    with conn() as c:
+        rows = c.execute(
+            f"""
+          SELECT COALESCE(p.categoria, 'Sem categoria') AS categoria,
+                 SUM(si.qtde*si.preco_unit) AS faturamento
+          FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id
+          WHERE {where}
+          GROUP BY COALESCE(p.categoria, 'Sem categoria')
+          ORDER BY faturamento DESC
+        """,
+            params,
+        ).fetchall()
+    headers = ["Categoria", "Faturamento"]
+    return as_csv(rows, headers, "categorias.csv")
+
+
+@app.route("/export/cidades.csv")
+def export_cidades_csv():
+    ini, fim, categoria, cidade, vendedor, incluir_rma = get_filters()
+    where, params = apply_filters_where(ini, fim, categoria, cidade, vendedor)
+    with conn() as c:
+        rows = c.execute(
+            f"""
+          SELECT COALESCE(s.cidade_snapshot,'(sem cidade)') AS cidade,
+                 SUM(si.qtde*si.preco_unit) AS faturamento
+          FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id
+          WHERE {where}
+          GROUP BY COALESCE(s.cidade_snapshot,'(sem cidade)')
+          ORDER BY faturamento DESC
+        """,
+            params,
+        ).fetchall()
+    headers = ["Cidade", "Faturamento"]
+    return as_csv(rows, headers, "cidades.csv")
 
 @app.route("/api/product_suggestions")
 def product_suggestions():
