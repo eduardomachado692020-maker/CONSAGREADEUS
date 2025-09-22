@@ -21,7 +21,18 @@
     <div class="col-md-2"><label class="form-label">Preço aplicado (R$)</label><input type="number" step="0.01" name="preco_unit" class="form-control" required></div>
     <div class="col-md-2"><label class="form-label">Desconto (%)</label><input type="number" step="0.01" name="desconto_pct" class="form-control" value="0"></div>
     <div class="col-md-2"><label class="form-label">Desconto (R$)</label><input type="number" step="0.01" name="desconto_valor" class="form-control" value="0"></div>
-    <div class="col-md-1"><label class="form-label">Vend. ID</label><input type="number" name="vendedor_id" class="form-control" value="2"></div>
+    <div class="col-md-3">
+      <label class="form-label">Vendedor</label>
+      <select name="vendedor_id" class="form-select">
+        {% if vendedores %}
+          {% for v in vendedores %}
+            <option value="{{ v.id }}">{{ v.nome }}</option>
+          {% endfor %}
+        {% else %}
+          <option value="2">ID 2 (padrão)</option>
+        {% endif %}
+      </select>
+    </div>
     <div class="col-md-3"><label class="form-label">Motivo desconto</label><input name="motivo_desconto" class="form-control"></div>
     <div class="col-md-2"><label class="form-label">PIN gerente (se exigir)</label><input name="pin_aprovacao" class="form-control"></div>
   </div>

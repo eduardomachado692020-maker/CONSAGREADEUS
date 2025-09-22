@@ -12,18 +12,37 @@
       <div class="card-body">
         {% if reposicao %}
           <table class="table table-sm">
-            <thead><tr><th>SKU</th><th>Produto</th><th>Estoque</th><th>Mínimo</th></tr></thead>
+            <thead>
+              <tr><th>SKU (ex.)</th><th>Produto (Nome+Modelo+Capacidade)</th><th>Estoque</th><th>Mínimo</th><th>Categoria</th></tr>
+            </thead>
             <tbody>
             {% for r in reposicao %}
-              <tr><td>{{ r.sku }}</td><td>{{ r.nome }}</td><td>{{ r.estoque_atual }}</td><td>{{ r.estoque_minimo }}</td></tr>
+              <tr>
+                <td>{{ r.sku }}</td>
+                <td>{{ r.produto or r.nome }}</td>
+                <td>{{ r.estoque or r.estoque_atual }}</td>
+                <td>{{ r.minimo or r.estoque_minimo }}</td>
+                <td>{{ r.categoria }}</td>
+              </tr>
             {% endfor %}
             </tbody>
           </table>
-          <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('export_reposicao_csv') }}">Exportar CSV</a>
+          <div class="mt-2 d-flex gap-2">
+            <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('export_reposicao_csv') }}">Exportar CSV</a>
+          </div>
         {% else %}
           <div class="card-empty p-3">Sem dados ainda — cadastre produtos e estoques mínimos.</div>
         {% endif %}
       </div>
+    </div>
+  </div>
+  <div class="col-12">
+    <div class="mt-3 d-flex flex-wrap gap-2">
+      <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('export_vendas_csv') }}">Exportar Vendas (CSV)</a>
+      <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('export_top10_faturamento_csv') }}">Top 10 Faturamento (CSV)</a>
+      <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('export_top10_quantidade_csv') }}">Top 10 Quantidade (CSV)</a>
+      <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('export_categorias_csv') }}">Por Categoria (CSV)</a>
+      <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('export_cidades_csv') }}">Por Cidade (CSV)</a>
     </div>
   </div>
   <div class="col-lg-6">
